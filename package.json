@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "aws-sdk": "^2.1406.0",
+    "heic-convert": "^1.2.4",
+    "querystring": "^0.2.1",
+    "sharp": "^0.32.1"
+  }
+}
