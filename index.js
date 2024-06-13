@@ -1,96 +1,154 @@
-const querystring = require("querystring");
-const AWS = require("aws-sdk");
-const Sharp  = require('sharp');
-const convert = require('heic-convert');
+'use strict';
 
-//서울 Region
+const querystring = require('querystring'); // Don't install.
+const AWS = require('aws-sdk'); // Don't install.
+
+// http://sharp.pixelplumbing.com/en/stable/api-resize/
+const Sharp = require('sharp');
+
 const S3 = new AWS.S3({
-  region: "ap-northeast-2" 
+  region: 'ap-northeast-2'  // 버킷을 생성한 리전 입력(여기선 서울)
 });
 
-// S3 bucket 이름 지정
-const BUCKET = BUCTKET_NAME;
+const BUCKET = 'resize-o2' // Input your bucket
 
-// 디폴트 사이즈
-const MAX_WIDTH = 1920;
-const MAX_HEIGHT = 1080;
-const MAX_QUALITY = 100;
+// Image types that can be handled by Sharp
+const supportImageTypes = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'tiff', 'jfif'];
 
-const allowedExtension = [ "jpg", "jpeg", "png", "webp", "heic" ];
+exports.handler = async(event, context, callback) => {
+  const { request, response } = event.Records[0].cf;
 
-exports.handler = (event, context, callback) => { 
-  console.log(event.toString())
-  
-  const request = event.Records[0].cf.request;
-  const response = event.Records[0].cf.response;
-  console.log(response)
+  console.log("request: ", request)
+  console.log("response: ", response)
+
+  // Parameters are w, h, f, q and indicate width, height, format and quality.
+  const { uri } = request;
+
+  const ObjectKey = decodeURIComponent(uri).substring(1);
   const params = querystring.parse(request.querystring);
-  const width = ( isNaN(parseInt(params.w)) || parseInt(params.w) <= 0 ) ? MAX_WIDTH : Math.min(parseInt(params.w), MAX_WIDTH);
-  const height = ( isNaN(parseInt(params.h)) || parseInt(params.h) <= 0 ) ? MAX_HEIGHT : Math.min(parseInt(params.h), MAX_HEIGHT);
-  const quality = ( isNaN(parseInt(params.q)) || parseInt(params.q) <= 0 ) ? MAX_QUALITY : Math.min(parseInt(params.q), MAX_QUALITY);
+  const { w, h, q, f } = params
 
-  const uri = request.uri;
-  const [, imageName, extension] = uri.match(/\/(.*)\.(.*)/);
+  /**
+   * ex) https://dilgv5hokpawv.cloudfront.net/dev/thumbnail.png?w=200&h=150&f=webp&q=90
+   * - ObjectKey: 'dev/thumbnail.png'
+   * - w: '200'
+   * - h: '150'
+   * - f: 'webp'
+   * - q: '90'
+   */
 
-  // 리사이즈 이미지 format. 
-  const requiredFormat = extension == 'webp' ? 'webp' : 'jpeg'
-  const originalKey = `${imageName}.${extension}`;
-
-  // 대응 이미지 체크
-  if(!allowedExtension.includes(extension)){
-    response.status = '500';
-    response.headers['content-type'] = [{ key: 'Content-Type', value: 'text/plain' }];
-    response.body = `${extension} is not allowed`;
-    callback(null, response);
-    return;
+  // 크기 조절이 없는 경우 원본 반환.
+  if (!(w || h)) {
+    return callback(null, response);
   }
 
-  // S3에서 이미지를 읽어옵니다.
-  S3.getObject({ Bucket: BUCKET, Key: originalKey }).promise()
-    // heic 파일인 경우에는 jpeg로 변경한 후 처리
-    .then(data => {
-      if(extension === 'heic'){
-        return convert({
-          buffer: data.Body,
-          format: 'JPEG',    
-          quality: 1         
-        });
-      }else{
-        return data.Body;
-      }
-    })
-    .then(input => {
-      const image = Sharp(input);
-      image
-        .metadata()
-        .then(meta => {
-          const resizeWidth = Math.min(meta.width, width)
-          const resizeHeight = Math.min(meta.height, height)
-          // 이미지 리사이징
-          return image
-            .resize({
-              width: resizeWidth,
-              height: resizeHeight,
-              fit: 'inside'
-            })
-            .toFormat(requiredFormat,  { quality })
-            .toBuffer();
-        })
-        .then(buffer => {
-          // response에 리사이징 한 이미지를 담아서 반환
-          response.status = 200;
-          response.body = buffer.toString('base64');
-          response.bodyEncoding = 'base64';
-          response.headers["content-type"] = [
-            { key: "Content-Type", value: "image/" + requiredFormat }
-          ];
-          callback(null, response);
-        })
-    })
-    .catch((e) => {
-      response.status = '404';
-      response.headers['content-type'] = [{ key: 'Content-Type', value: 'text/plain' }];
-      response.body = `${request.uri} is not found.`;
-      callback(null, response);
-    });  
-}
+
+  const extension = uri.match(/\/?(.*)\.(.*)/)[2].toLowerCase();
+  console.log('extension : ', extension);
+
+  const width = parseInt(w, 10) || null;
+  const height = parseInt(h, 10) || null;
+  const quality = parseInt(q, 10) || 100; // Sharp는 이미지 포맷에 따라서 품질(quality)의 기본값이 다릅니다.
+  let format = (f || extension).toLowerCase();
+  let s3Object;
+  let resizedImage;
+
+  // 포맷 변환이 없는 GIF 포맷 요청은 원본 반환.
+  if (extension === 'gif' && !f) {
+    return callback(null, response);
+  }
+
+  // Init format.
+format = params.f ? params.f : 'webp'; //따로 포맷형태를 주지않으면 webp로 변경
+  format = format === 'jpg' ? 'jpeg' : format;
+
+  if (!supportImageTypes.some(type => type === extension )) {
+    responseHandler(
+      403,
+      'Forbidden',
+      'Unsupported image type', [{
+        key: 'Content-Type',
+        value: 'text/plain'
+      }],
+    );
+    return callback(null, response);
+  }
+
+
+  // Verify For AWS CloudWatch.
+  console.log(`parmas: ${JSON.stringify(params)}`); // Cannot convert object to primitive value.\
+  console.log('S3 Object key:', ObjectKey)
+  console.log('Bucket name : ', BUCKET);
+
+  try {
+    s3Object = await S3.getObject({
+      Bucket: BUCKET,
+      Key: ObjectKey
+    }).promise();
+
+    console.log('S3 Object:', s3Object);
+  }
+  catch (error) {
+    console.log('S3.getObject error : ', error);
+    responseHandler(
+      404,
+      'Not Found',
+      'OMG... The image does not exist.', [{ key: 'Content-Type', value: 'text/plain' }],
+    );
+    return callback(null, response);
+  }
+
+  try {
+    resizedImage = await Sharp(s3Object.Body)
+      .rotate()
+      .resize(width, height)
+      .toFormat(format, {
+        quality
+      })
+      .toBuffer();
+  }
+  catch (error) {
+    console.log('Sharp error : ', error);
+    responseHandler(
+      500,
+      'Internal Server Error',
+      'Fail to resize image.', [{
+        key: 'Content-Type',
+        value: 'text/plain'
+      }],
+    );
+    return callback(null, response);
+  }
+
+  // 응답 이미지 용량이 1MB 이상일 경우 원본 반환.
+  if (Buffer.byteLength(resizedImage, 'base64') >= 1048576) {
+    return callback(null, response);
+  }
+
+  responseHandler(
+    200,
+    'OK',
+    resizedImage.toString('base64'), [{
+      key: 'Content-Type',
+      value: `image/${format}`
+    }],
+    'base64'
+  );
+
+  /**
+   * @summary response 객체 수정을 위한 wrapping 함수
+   */
+  function responseHandler(status, statusDescription, body, contentHeader, bodyEncoding) {
+    response.status = status;
+    response.statusDescription = statusDescription;
+    response.body = body;
+    response.headers['content-type'] = contentHeader;
+    if (bodyEncoding) {
+      response.bodyEncoding = bodyEncoding;
+    }
+  }
+
+  console.log('Success resizing image');
+
+  return callback(null, response);
+};
