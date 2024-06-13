@@ -10,7 +10,7 @@ const S3 = new AWS.S3({
   region: 'ap-northeast-2'  // 버킷을 생성한 리전 입력(여기선 서울)
 });
 
-const BUCKET = S3_BUCKET_NAME // Input your bucket
+const BUCKET = 'S3_BUCKET_NAME' //******s3버킷 이름 변경 필요*****
 
 // Image types that can be handled by Sharp
 const supportImageTypes = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'tiff', 'jfif'];
